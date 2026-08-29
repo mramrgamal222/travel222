@@ -1,0 +1,93 @@
+name: Build Guard Protection APK
+
+on:
+  push:
+    branches:
+      - guard-apk-build-temp
+    paths:
+      - 'guard-build/**'
+      - '.github/workflows/build-guard-protection-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Reconstruct Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p guard-src
+          cat guard-build/source.part*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/guard-source.tar.gz
+          tar -xzf /tmp/guard-source.tar.gz -C guard-src
+          test -f guard-src/app/build.gradle
+          test -f guard-src/app/src/main/AndroidManifest.xml
+
+      - name: Generate default siren WAV
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p guard-src/app/src/main/res/raw
+          python3 - <<'PY'
+          import math, wave, struct
+          from pathlib import Path
+          out = Path('guard-src/app/src/main/res/raw/guard_siren.wav')
+          rate = 44100
+          duration = 4.0
+          frames = []
+          for i in range(int(rate * duration)):
+              t = i / rate
+              freq = 860.0 if (t % 0.8) < 0.4 else 1180.0
+              mod = 0.82 + 0.18 * math.sin(2 * math.pi * 4.0 * t)
+              sample = 0.75 * mod * math.sin(2 * math.pi * freq * t)
+              frames.append(struct.pack('<h', int(max(-1, min(1, sample)) * 32767)))
+          with wave.open(str(out), 'wb') as w:
+              w.setnchannels(1)
+              w.setsampwidth(2)
+              w.setframerate(rate)
+              w.writeframes(b''.join(frames))
+          print(out, out.stat().st_size)
+          PY
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Build debug APK
+        working-directory: guard-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:assembleDebug --stacktrace --no-daemon
+          test -f app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GuardProtection-APK
+          path: guard-src/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
